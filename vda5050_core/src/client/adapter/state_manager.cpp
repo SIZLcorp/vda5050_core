@@ -431,6 +431,16 @@ void StateManager::clear_order()
 }
 
 //=============================================================================
+void StateManager::clear_order_progress()
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  state_.node_states.clear();
+  state_.edge_states.clear();
+  publish_requested_ = true;
+}
+
+//=============================================================================
 void StateManager::set_last_node(
   const std::string& node_id, uint32_t sequence_id)
 {

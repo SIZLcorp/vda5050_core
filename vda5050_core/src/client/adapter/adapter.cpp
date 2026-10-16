@@ -20,6 +20,7 @@
 #include <utility>
 
 #include "vda5050_core/errors/error_codes.hpp"
+#include "vda5050_core/errors/error_factory.hpp"
 #include "vda5050_core/logger/logger.hpp"
 #include "vda5050_core/validation/order_graph_validator.hpp"
 
@@ -191,10 +192,16 @@ void Adapter::Implementation::start_state_thread()
   state_thread = std::thread([this]() {
     while (running)
     {
+      // VDA 5050 2.x section 6.10.1: publish on relevant events (state setters
+      // mark a publish request without notifying) or at the latest every 30 s.
       std::unique_lock<std::mutex> lock(state_mutex);
-      state_cv.wait_for(lock, std::chrono::seconds(30), [this]() {
-        return !running || state_manager->consume_publish_requested();
-      });
+      const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);
+      while (running && !state_manager->consume_publish_requested() &&
+             std::chrono::steady_clock::now() < deadline)
+      {
+        state_cv.wait_for(lock, std::chrono::milliseconds(50));
+      }
 
       if (!running) break;
 
@@ -240,7 +247,7 @@ void Adapter::Implementation::process_navigation()
 
     if (!active->order.has_value()) return;
 
-    if (active->order->executing) return;
+    if (active->order->executing || active->order->canceled) return;
 
     order_state = *active->order;
   }
@@ -402,6 +409,10 @@ void Adapter::Implementation::process_actions()
   {
     handle_state_request(execution);
   }
+  else if (action.action_type == "cancelOrder")
+  {
+    handle_cancel_order(std::move(request), execution);
+  }
   else if (action.action_type == "initPosition")
   {
     if (!action.action_parameters.has_value())
@@ -432,7 +443,8 @@ void Adapter::Implementation::process_actions()
 void Adapter::Implementation::publish_factsheet()
 {
   auto manager = factsheet_manager.lock();
-  protocol_adapter->publish<types::Factsheet>(manager->factsheet.value(), 0);
+  // VDA 5050 2.x section 6.15: factsheet messages are sent with the retained flag.
+  protocol_adapter->publish<types::Factsheet>(manager->factsheet.value(), 0, true);
 }
 
 //=============================================================================
@@ -456,6 +468,45 @@ void Adapter::Implementation::handle_state_request(
   request_state_publish();
   execution->finished();
   VDA5050_INFO("Received stateRequest");
+}
+
+//=============================================================================
+void Adapter::Implementation::handle_cancel_order(
+  ActionRequest request, std::shared_ptr<ActionExecution> execution)
+{
+  // VDA 5050 2.x section 6.6.3: stop dispatching the order, let the vehicle
+  // stop its movement and report FINISHED once stopped. orderId and
+  // orderUpdateId are kept. Section 6.6.3.2: without an order to cancel the
+  // action fails with a "noOrderToCancel" warning referencing the actionId.
+  bool has_order = false;
+  {
+    auto active = active_order.lock();
+    if (
+      active->order.has_value() && !active->order->canceled &&
+      !is_order_complete(*active->order))
+    {
+      active->order->canceled = true;
+      has_order = true;
+      state_manager->clear_order_progress();
+    }
+  }
+
+  if (!has_order)
+  {
+    state_manager->add_error(errors::create_error(
+      "noOrderToCancel", "There is no active order to cancel.",
+      {{errors::RefActionId, request.action_id()}},
+      types::ErrorLevel::WARNING));
+    execution->failed("noOrderToCancel");
+    return;
+  }
+
+  if (!action_callback)
+  {
+    execution->finished();
+    return;
+  }
+  action_callback(std::move(request), execution);
 }
 
 //=============================================================================
@@ -611,6 +662,7 @@ types::Factsheet Adapter::Implementation::make_default_factsheet()
 //=============================================================================
 bool Adapter::Implementation::is_order_complete(const ActiveOrder& active_order)
 {
+  if (active_order.canceled) return true;
   if (active_order.order.nodes.empty()) return true;
 
   uint32_t max_seq = 0;

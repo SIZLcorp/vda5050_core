@@ -87,6 +87,10 @@ struct ActiveOrder
   std::optional<std::uint32_t> last_completed_node_sequence_id;
 
   bool executing{false};
+
+  /// Set by cancelOrder (VDA 5050 2.x section 6.6.3): no further nodes are
+  /// dispatched and a new order with a different orderId is accepted.
+  bool canceled{false};
 };
 
 struct ActiveOrderState
@@ -155,6 +159,9 @@ public:
   void request_state_publish();
 
   void handle_state_request(std::shared_ptr<ActionExecution> execution);
+
+  void handle_cancel_order(
+    ActionRequest request, std::shared_ptr<ActionExecution> execution);
 
   void handle_factsheet_request(std::shared_ptr<ActionExecution> execution);
 

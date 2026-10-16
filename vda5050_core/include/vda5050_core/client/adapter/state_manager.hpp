@@ -124,6 +124,11 @@ private:
 
   void clear_order();
 
+  /// Drop the remaining node and edge states but keep orderId and
+  /// orderUpdateId (VDA 5050 2.x section 6.6.3: the cancelled order is
+  /// deleted, orderId and orderUpdateId are kept).
+  void clear_order_progress();
+
   void set_last_node(const std::string& node_id, uint32_t sequence_id = 0);
 
   mutable std::mutex mutex_;
